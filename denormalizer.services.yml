@@ -1,0 +1,8 @@
+services:
+  denormalizer.manager:
+    class: Drupal\denormalizer\Service\DenormalizerManager
+    arguments: ['@entity_type.manager', '@entity_field.manager', '@database']
+
+  plugin.manager.schema_denormalizer:
+    class: Drupal\denormalizer\Plugin\Denormalizer\SchemaDenormalizerManager
+    parent: default_plugin_manager

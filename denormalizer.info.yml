@@ -1,0 +1,5 @@
+name: 'Denormalizer'
+type: module
+description: 'Denormalizes entity data.'
+core: 8.x
+configure: denormalizer.settings

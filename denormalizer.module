@@ -1,0 +1,405 @@
+<?php
+
+use Drupal\Core\Database\Database;
+
+/**
+ * Implements hook_cron().
+ *
+ * Run or reload periodically.
+ */
+function denormalizer_cron() {
+  /*if (variable_get('denormalizer_cron_enabled')) {
+    $last_run = variable_get('denormalizer_last_run', 0);
+
+    $reset = NULL;
+
+    if (variable_get('denormalizer_reload_every') && ($last_run + variable_get('denormalizer_reload_every')) <= REQUEST_TIME) {
+      $reset = TRUE;
+    }
+    elseif (variable_get('denormalizer_run_every') && ($last_run + variable_get('denormalizer_run_every')) <= REQUEST_TIME) {
+      $reset = FALSE;
+    }
+
+    if (!is_null($reset)) {
+      $denormalizer = new Denormalizer();
+      $denormalizer->build();
+      try {
+        $denormalizer->execute($reset);
+      } catch (PDOException $e) {
+        if (in_array($e->getCode(), array('42S22', '21S01'))) {
+          watchdog('denormalizer', 'Different fields detected. Running reload.', array(), WATCHDOG_NOTICE);
+          $denormalizer->execute(TRUE);
+        }
+      }
+
+      variable_set('denormalizer_last_run', REQUEST_TIME);
+      watchdog('denormalizer', 'Ran denormalizer.', array(), WATCHDOG_INFO);
+    }
+  }*/
+}
+
+/**
+ * Get denormalizer info from module implementation.
+ *
+ * This almost mirrors entity_info() but the 'bundles' key is flat.
+ *
+ * @return type
+ */
+function denormalizer_get_info() {
+  $info = \Drupal::moduleHandler()->invokeAll('denormalizer_info');
+  foreach ($info as $target_table => &$entry) {
+    if (!isset($entry['bundles'])) {
+      $entry['bundles'] = array();
+    }
+    if (isset($entry['entity_type'])) {
+      $entry += (array) \Drupal::entityTypeManager()->getDefinition($entry['entity_type']);
+    }
+    if (!isset($entry['fields'])) {
+      $entry['fields'] = [];
+    }
+  }
+  return $info;
+}
+
+/**
+ * Get the primary key of a table in the Drupal schema.
+ *
+ * @param string $table
+ *
+ * @return string
+ */
+function denormalizer_get_primary_key($dn_table) {
+  $d = denormalizer_get_info();
+  $dn_info = $d[$dn_table];
+
+  if (isset($d[$dn_table]['primary key'])) {
+    // Manually defined primary key.
+    return $d[$dn_table]['primary key'];
+  }
+
+  if ($dn_table == 'user') {
+    // Special case for the user table.
+    return 'uid';
+  }
+
+  // Drupal defined table.
+  //Diao replace "$d['schema_module']" by "$d[$dn_table]['schema_module']"
+  $schema = drupal_get_module_schema($d[$dn_table]['schema_module'], $d[$dn_table]['base table']);
+  if (isset($schema['primary key']) && count($schema['primary key']) == 1) {
+    return $schema['primary key'][0];
+  }
+
+  if (isset($dn_info['surrogate key'])) {
+    return $dn_info['surrogate key'];
+  }
+}
+
+/**
+ * Convert db_select to SQL.
+ *
+ * Modified from devel module.
+ *
+ * @param Drupal\Core\Database\Driver\mysql\Select $query
+ *
+ * @return string
+ *   SQL of db_select object.
+ */
+function denormalizer_dpq($query) {
+   $config = \Drupal::service('config.factory')->getEditable('denormalizer.settings');
+  if (method_exists($query, 'preExecute')) {
+    $query->preExecute();
+  }
+  $sql = (string) $query;
+  $quoted = array();
+  $connection = Database::getConnection();
+  foreach ((array) $query->arguments() as $key => $val) {
+    $quoted[$key] = $connection->quote($val);
+  }
+  $sql = strtr($sql, $quoted);
+
+  if ($config->get('db') == 'external') {
+    // DB prefix
+    $dw_prefix = denormalizer_source_db();
+    $search = array('{', '}');
+    $replace = array($dw_prefix . '.' . $connection->tablePrefix(), '');
+    $sql = str_replace($search, $replace, $sql);
+  }
+  else {
+    $sql = $connection->prefixTables($sql);
+  }
+
+  return $sql;
+}
+
+/**
+ * Get the current (source) database name.
+ *
+ * @return string
+ */
+function denormalizer_source_db() {
+  $db = db_query('select database()')->fetchField();
+  return $db;
+}
+
+/**
+ * Get the target database name.
+ *
+ * @return string
+ */
+function denormalizer_target_db() {
+  $db = db_query('select database()')->fetchField();
+  $config = \Drupal::config('denormalizer.settings');
+  return $config->get('db_prefix') . $db;
+}
+
+/**
+ * Implements hook_menu().
+ */
+function denormalizer_menu() {
+  $items = array();
+
+  $items['admin/config/development/denormalizer/settings'] = array(
+    'title' => 'Settings',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+  );
+
+  $items['admin/config/development/denormalizer'] = array(
+    'title' => 'Denormalizer',
+    'description' => 'Export and denormalize any kind of content into any target database.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('denormalizer_settings_form'),
+    'access arguments' => array('administer denormalizer'),
+  );
+
+  $items['admin/config/development/denormalizer/create'] = array(
+    'title' => 'Create',
+    'description' => 'Create denormalized views.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('denormalizer_create_form'),
+    'access arguments' => array('administer denormalizer'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 4,
+  );
+
+  $items['admin/config/development/denormalizer/export'] = array(
+    'title' => 'Export',
+    'description' => 'Export and denormalize any kind of content into any target database.',
+    'page callback' => 'denormalizer_export',
+    'access arguments' => array('administer denormalizer'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 5,
+  );
+
+  return $items;
+}
+
+
+
+/**
+ * Confirmation form for creation.
+ */
+function denormalizer_create_form($form, $form_state) {
+  $confirm = confirm_form($form, 'Ready?', 'admin/config/development/denormalizer', t('This will create database views of normalized data.'));
+  $confirm['actions']['delete'] = array(
+    '#type' => 'submit',
+    '#value' => t('Reset tables'),
+    '#submit' => array('denormalizer_create_form_submit_reset'),
+  );
+  return $confirm;
+}
+
+
+/**
+ * Full update submit callback.
+ */
+function denormalizer_create_form_submit_reset($form, $form_state) {
+  $denormalizer = new Denormalizer();
+  $denormalizer->build();
+  $denormalizer->execute(TRUE);
+  $config = \Drupal::service('config.factory')->getEditable('denormalizer.settings');
+  $config->set('last_run', REQUEST_TIME);
+  \Drupal::logger('denormalizer')->info('Ran denormalizer.');
+}
+
+/**
+ * Export page.
+ */
+function denormalizer_export() {
+  $denormalizer = new Denormalizer();
+  $denormalizer->build();
+  return $denormalizer->getSql();
+}
+
+/**
+ * Implements hook_hook_info().
+ */
+function denormalizer_hook_info() {
+  $hooks = array();
+  $hooks['denormalizer_alter'] = array(
+    'group' => 'denormalizer',
+  );
+  $hooks['denormalizer_info'] = array(
+    'group' => 'denormalizer',
+  );
+  return $hooks;
+}
+
+/**
+ * Implements hook_denormalizer_alter().
+ *
+ * Add some default denormalization alters.
+ *
+ *
+ */
+function denormalizer_denormalizer_alter(Drupal\Core\Database\Driver\mysql\Select $q, $view, $dn) {
+  if ($view == 'user') {
+    $q->addJoin('LEFT', 'users_roles', 'ur', 'ur.uid = dn_user.uid');
+    $q->addJoin('LEFT', 'role', 'r', 'r.rid = ur.rid');
+    $q->addExpression("group_concat(r.name SEPARATOR '|')", 'roles');
+    // Group by primary key, so group_concat will work.
+    $q->groupBy('dn_user.uid');
+  }
+
+  if ($view == 'webform_submissions') {
+    $fields = &$q->getFields();
+    // Remove the integer fields and replace them with dates.
+    unset($fields['submitted']);
+    $q->addExpression('from_unixtime(submitted)', 'submitted');
+    unset($fields['completed']);
+    $q->addExpression('from_unixtime(completed)', 'completed');
+    unset($fields['modified']);
+    $q->addExpression('from_unixtime(modified)', 'modified');
+  }
+
+  // @todo: move webform_component_bi into dw db
+  if ($view == 'webform_component') {
+    // Remove the name field and replace it with a varchar.
+    $fields = &$q->getFields();
+    unset($fields['name']);
+    unset($fields['weight']);
+    $q->addExpression('substr(name, 1, 255)', 'name');
+    unset($fields['extra']);
+    $q->addExpression('cast(weight as decimal(8,2))', 'weight');
+    // Create surrogate key.
+    $q->addExpression("CONCAT_WS('-', nid, dn_webform_component.form_key)", 'pk');
+
+    // Extract grid components into their own form components.
+    $result = db_query("select nid, cid, form_key, extra, weight from {webform_component} where type='grid'");
+
+    // Make a fake empty webform component table.
+    $start = microtime(TRUE);
+    $tablename = 'webform_component_bi';
+    if (db_table_exists($tablename)) {
+      db_drop_table($tablename);
+    }
+    db_query("create table {{$tablename}} select
+      nid,
+      cid,
+      pid,
+      cast(form_key as char(255)) as form_key,
+      type,
+      '' as value,
+      required,
+      cast('' as char(255)) as name,
+      cast(weight as decimal(8,2)) as weight,
+      cast('' as char(255)) as pk
+      from {webform_component}
+      limit 0");
+
+    $batchValues = array();
+    while ($row = $result->fetch()) {
+      $data = unserialize($row->extra);
+      if (isset($data['questions'])) {
+        $questions = list_extract_allowed_values($data['questions'], 'list_text', FALSE);
+        $i = 0;
+        foreach ($questions as $key => $question) {
+          $i++;
+          $form_key = $row->form_key . '-' . $key;
+          $batchValues[] = array(
+            'nid' => $row->nid,
+            'cid' => $row->cid,
+            'pid' => $row->cid,
+            'form_key' => $form_key,
+            'name' => substr($question, 0, 255),
+            'type' => 'grid_sub',
+            'weight' => $row->weight + ($i / 100),
+            'pk' => $row->nid . '-' . $form_key,
+          );
+        }
+      }
+    }
+    foreach (array_chunk($batchValues, variable_get('denormalizer_chunk_size', 5000)) as $chunk) {
+      $insert = db_insert($tablename)->fields(array('nid', 'cid', 'pid', 'form_key', 'name', 'type', 'weight', 'pk'));
+      foreach ($chunk as $set) {
+        $insert->values($set);
+      }
+      $insert->execute();
+    }
+
+    $end = microtime(TRUE);
+    drupal_set_message(t("Created intermediate TABLE $tablename with @c records in @s seconds.", array('@c' => count($batchValues), '@s' => round($end - $start, 2))));
+
+    $gridcomponents = db_select($tablename, 'dn_webform_component')
+      ->fields('dn_webform_component');
+    // We need to mirror the incremental conditions to this union subquery.
+    $conditions = $q->havingConditions();
+    foreach (element_children($conditions) as $key) {
+      $gridcomponents->havingCondition($conditions[$key]['field'], $conditions[$key]['value'], $conditions[$key]['operator']);
+    }
+    $q->union($gridcomponents, 'ALL');
+  }
+
+  // @todo: move webform_component_av into dw db
+  if ($view == 'webform_submitted_data') {
+    // Remove the data field and replace it with a varchar.
+    $fields = &$q->getFields();
+    unset($fields['data']);
+    $q->addExpression('substr(data, 1, 255)', 'data');
+
+    // Create surrogate key.
+    $q->addExpression("CONCAT_WS('-', sid, dn_webform_submitted_data.cid, no)", 'pk');
+
+    // Dump unserialized data into a temporary table.
+    $start = microtime(TRUE);
+
+    $tablename = 'webform_component_av';
+    if (db_table_exists($tablename)) {
+      db_drop_table($tablename);
+    }
+    db_query("create table {{$tablename}} select nid, cid, cast('' as char(255)) as `key`, cast('' as char(255)) as `value` from {webform_component} limit 0");
+
+    db_add_primary_key($tablename, array('nid', 'cid', 'key'));
+    $result = db_query("select nid, cid, extra from {webform_component} where type in ('grid', 'select')");
+    $batchValues = array();
+    while ($row = $result->fetch()) {
+      $data = unserialize($row->extra);
+      $items = list_extract_allowed_values(isset($data['items']) ? $data['items'] : $data['options'], 'list_text', FALSE);
+      foreach ($items as $key => $value) {
+        $batchValues[] = array(
+          'nid' => $row->nid,
+          'cid' => $row->cid,
+          '`key`' => $key,
+          'value' => substr($value, 0, 255),
+        );
+      }
+    }
+    foreach (array_chunk($batchValues, variable_get('denormalizer_chunk_size', 5000)) as $chunk) {
+      $insert = db_insert($tablename)->fields(array('nid', 'cid', '`key`', 'value'));
+      foreach ($chunk as $set) {
+        $insert->values($set);
+      }
+      $insert->execute();
+    }
+    $end = microtime(TRUE);
+    drupal_set_message(t("Created intermediate TABLE $tablename with @c records in @s seconds.", array('@c' => count($batchValues), '@s' => round($end - $start, 2))));
+
+    // Join the "webform allowed values" table.
+    $q->addJoin('LEFT', $tablename, 'wav', 'dn_webform_submitted_data.data = wav.key and dn_webform_submitted_data.cid = wav.cid and  dn_webform_submitted_data.nid = wav.nid');
+    $q->fields('wav', array('value'));
+
+    // We really need the form keys.
+    $q->addJoin('LEFT', 'webform_component', 'wc', 'dn_webform_submitted_data.nid = wc.nid and dn_webform_submitted_data.cid = wc.cid');
+    //$q->fields('wc', array('form_key'));
+    $q->addExpression("IF(wc.type != 'grid', form_key, (CONCAT_WS('-', form_key, no)))", 'form_key');
+  }
+}

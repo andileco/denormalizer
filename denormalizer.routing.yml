@@ -1,0 +1,23 @@
+denormalizer.create:
+  path: 'admin/config/development/denormalizer/create'
+  defaults:
+    _form: '\Drupal\denormalizer\Form\DenormalizerCreateForm'
+    _title: 'Confirm Creation'
+  requirements:
+    _permission: 'administer site configuration'
+
+denormalizer.export:
+  path: 'admin/config/development/denormalizer/export'
+  defaults:
+    _form: '\Drupal\denormalizer\Form\DenormalizerExportForm'
+    _title: 'Confirm Creation'
+  requirements:
+    _permission: 'administer site configuration'
+
+denormalizer.settings:
+  path: '/admin/config/development/denormalizer'
+  defaults:
+    _form: 'Drupal\denormalizer\Form\DenormalizerSettingsForm'
+    _title: 'Denormalizer settings'
+  requirements:
+    _permission: 'administer denormalizer'

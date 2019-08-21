@@ -1,0 +1,12 @@
+denormalizer.create:
+  title: Create
+  description: Run denormalization.
+  route_name: denormalizer.create
+  appears_on:
+    - denormalizer.settings
+denormalizer.export:
+  title: Export
+  description: Export denormalization.
+  route_name: denormalizer.export
+  appears_on:
+    - denormalizer.settings

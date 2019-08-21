@@ -1,0 +1,5 @@
+denormalizer.settings:
+  title: Denormalizer
+  description: Configure or run denormalization.
+  route_name: denormalizer.settings
+  parent: system.admin_config_development
